@@ -172,15 +172,15 @@ input[type=file] { border: 0; font-size: 13px; }
 
 /* ---------- auth / hero ---------- */
 .auth { display: grid; grid-template-columns: 1.25fr 1fr; gap: 56px; align-items: center; min-height: 600px; }
-.hero { position: relative; min-height: 560px; box-shadow: var(--shadow); overflow: hidden; }
+.hero { position: relative; min-height: 560px; box-shadow: var(--shadow); overflow: hidden; display: flex; align-items: flex-end; }
 .hero svg { position: absolute; inset: 0; width: 100%; height: 100%; }
-.hero .copy { position: absolute; left: 0; right: 0; bottom: 0; padding: 36px; color: #fff; background: linear-gradient(transparent, rgba(15, 10, 6, .78)); }
-.hero h1 { font-size: clamp(42px, 6vw, 76px); font-style: italic; font-weight: 400; }
+.hero .copy { position: relative; width: 100%; padding: 120px 36px 36px; color: #fff; background: linear-gradient(transparent, rgba(15, 10, 6, .8) 55%); }
+.hero h1 { font-size: clamp(34px, 5vw, 68px); font-style: italic; font-weight: 400; }
 .hero p { margin: 12px 0 0; max-width: 36ch; opacity: .9; }
 .tabs { display: flex; gap: 28px; margin-bottom: 28px; border-bottom: 1px solid var(--line); }
 .tabs button { border: 0; background: none; padding: 0 0 10px; cursor: pointer; font-size: 12px; letter-spacing: .2em; text-transform: uppercase; color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px; }
 .tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--ink); }
-@media (max-width: 860px) { .auth { grid-template-columns: 1fr; gap: 28px; } .hero { min-height: 340px; } }
+@media (max-width: 860px) { .auth { grid-template-columns: 1fr; gap: 28px; } .hero { min-height: 420px; } .hero .copy { padding: 100px 22px 24px; } }
 
 /* intro strip on the gallery page */
 .intro { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0; margin-bottom: 52px; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); }
@@ -196,3 +196,11 @@ input[type=file] { border: 0; font-size: 13px; }
 .demo-note { border: 1px solid var(--gold); color: #6c4a0c; padding: 10px 12px; font-size: 13px; margin-bottom: 14px; background: #faf3e2; }
 .dropzone { border: 1px dashed var(--ink); padding: 14px; text-align: center; background: #fff; cursor: pointer; }
 .dropzone img { max-height: 200px; display: block; margin: 0 auto 8px; }
+
+/* ---------- password field with show/hide ---------- */
+.pw { position: relative; display: block; }
+.pw input { padding-right: 48px; }
+.pw input[type=password] { font-family: system-ui, -apple-system, sans-serif; font-size: 24px; letter-spacing: .2em; line-height: 1.2; padding-top: 6px; padding-bottom: 6px; }
+.pw input[type=password]::placeholder { letter-spacing: 0; }
+.eye { position: absolute; right: 0; top: 50%; transform: translateY(-50%); border: 0; background: none; padding: 8px; cursor: pointer; color: var(--muted); display: grid; place-items: center; }
+.eye:hover, .eye[aria-pressed="true"] { color: var(--ink); }

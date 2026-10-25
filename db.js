@@ -79,6 +79,10 @@ export function openDb(file = process.env.DB_FILE || 'studio.db') {
       status TEXT NOT NULL DEFAULT 'created' CHECK (status IN ('created','paid','failed','refunded')),
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
     CREATE INDEX IF NOT EXISTS payments_by_record ON payments(kind, record_id);
+    -- Password reset: only a hash of the emailed token is stored, so a leaked database cannot be used to reset accounts.
+    CREATE TABLE IF NOT EXISTS password_resets (
+      token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id),
+      expires_at TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
     -- Live tracking: current stage and last known position of a delivery or a wall job.
     CREATE TABLE IF NOT EXISTS tracking (
       kind TEXT NOT NULL CHECK (kind IN ('orders','bookings')), record_id INTEGER NOT NULL,

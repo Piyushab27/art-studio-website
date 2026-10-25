@@ -16,7 +16,9 @@ const TODAY = '2026-10-25'; // frozen "today"
 const iso = (n) => new Date(Date.UTC(2026, 9, 25 + n)).toISOString().slice(0, 10);
 const db = openDb(join(tmpdir(), `studio-test-${Date.now()}.db`));
 const uploadDir = mkdtempSync(join(tmpdir(), 'studio-uploads-'));
-const server = createApp(db, { today: () => TODAY, uploadDir, simulationStepMs: 15, simulationSteps: 3 }).listen(0);
+const sentMail = [];
+const mailer = { mode: 'test', send: async (m) => { sentMail.push(m); } };
+const server = createApp(db, { today: () => TODAY, mailer, uploadDir, simulationStepMs: 15, simulationSteps: 3 }).listen(0);
 const base = `http://localhost:${server.address().port}`;
 const rate = seed.wallRatePerSqFt;
 const item = seed.potteryItems[0], glaze = seed.glazes[0];
@@ -281,6 +283,35 @@ test('live tracking: stages, location, ownership and simulated route', async () 
   assert.equal((await call(admin, 'POST', `/api/tracking/orders/${o.id}/simulate`)).status, 409);
   assert.equal((await call(admin, 'POST', `/api/tracking/orders/${o.id}/stage`, { stage: 'out_for_delivery' })).body.stage, 'out_for_delivery');
   assert.equal((await call(admin, 'POST', `/api/tracking/nothing/1/stage`, { stage: 'x' })).status, 404);
+});
+
+test('forgot / reset password: single-use link, no account leak, sessions revoked', async () => {
+  const who = await signup('resetme');
+  const before = sentMail.length;
+  const unknown = await call(null, 'POST', '/api/auth/forgot', { email: 'nobody@t.com' });
+  assert.equal(unknown.status, 200); assert.equal(sentMail.length, before); // same answer, no mail
+  const known = await call(null, 'POST', '/api/auth/forgot', { email: 'RESETME@t.com' });
+  assert.deepEqual(known.body, unknown.body);
+  assert.equal(sentMail.length, before + 1);
+  const token = sentMail.at(-1).link.split('#reset=')[1];
+  assert.match(token, /^[a-f0-9]{64}$/);
+  assert.equal((await call(null, 'POST', '/api/auth/reset', { token, password: '123' })).status, 400);
+  assert.equal((await call(null, 'POST', '/api/auth/reset', { token: 'f'.repeat(64), password: 'newsecret1' })).status, 400);
+  assert.equal((await call(null, 'POST', '/api/auth/reset', { token, password: 'newsecret1' })).status, 200);
+  assert.equal((await call(who, 'GET', '/api/me')).status, 401); // old session ended
+  assert.equal((await call(null, 'POST', '/api/auth/login', { email: 'resetme@t.com', password: 'secret1' })).status, 401);
+  assert.equal((await call(null, 'POST', '/api/auth/login', { email: 'resetme@t.com', password: 'newsecret1' })).status, 200);
+  assert.equal((await call(null, 'POST', '/api/auth/reset', { token, password: 'another1' })).status, 400); // used once
+  // expired link
+  await call(null, 'POST', '/api/auth/forgot', { email: 'resetme@t.com' });
+  const t2 = sentMail.at(-1).link.split('#reset=')[1];
+  db.prepare("UPDATE password_resets SET expires_at = datetime('now','-1 minute')").run();
+  assert.equal((await call(null, 'POST', '/api/auth/reset', { token: t2, password: 'another1' })).status, 400);
+  // the database never stores the raw token
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM password_resets WHERE token_hash = ?').get(t2).n, 0);
+  // rate limit: 5 requests per 15 minutes per IP + email
+  for (let i = 0; i < 5; i++) assert.equal((await call(null, 'POST', '/api/auth/forgot', { email: 'spam@t.com' })).status, 200);
+  assert.equal((await call(null, 'POST', '/api/auth/forgot', { email: 'spam@t.com' })).status, 429);
 });
 
 let failed = 0;

@@ -71,6 +71,37 @@ function artSvg(key, { grain = false } = {}) {
   return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid slice" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Abstract artwork">${defs}${body}${grain ? `<rect width="${W}" height="${H}" filter="url(#${id}n)"/>` : ''}</svg>`;
 }
 
+
+// A composed landscape for the login page: low sun, layered hills, arches, brush strokes, paper grain.
+function heroSvg() {
+  const ring = (r, c, o) => `<circle cx="520" cy="300" r="${r}" fill="${c}" opacity="${o}"/>`;
+  return `<svg viewBox="0 0 800 900" preserveAspectRatio="xMidYMid slice" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Abstract landscape painting">
+    <defs>
+      <linearGradient id="hSky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f4e6cd"/><stop offset=".55" stop-color="#f0c39a"/><stop offset="1" stop-color="#e0875f"/></linearGradient>
+      <radialGradient id="hGlow" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#fff2cf" stop-opacity=".95"/><stop offset="1" stop-color="#fff2cf" stop-opacity="0"/></radialGradient>
+      <filter id="hGrain"><feTurbulence type="fractalNoise" baseFrequency=".85" numOctaves="2" seed="7"/><feColorMatrix values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 .13 0"/></filter>
+    </defs>
+    <rect width="800" height="900" fill="url(#hSky)"/>
+    <circle cx="520" cy="300" r="300" fill="url(#hGlow)"/>
+    ${ring(150, '#d9633a', .95)}${ring(108, '#e8814f', .95)}${ring(66, '#f6b36d', .95)}
+    <circle cx="190" cy="150" r="26" fill="#fbe3a1"/><circle cx="196" cy="146" r="22" fill="#f4e6cd" opacity=".55"/>
+    <g fill="none" stroke="#fff8ea" stroke-linecap="round">
+      <path d="M-20 210 C160 150 330 250 520 190 S760 150 830 190" stroke-width="2.2" opacity=".5"/>
+      <path d="M-20 250 C170 205 340 290 520 235 S740 205 830 240" stroke-width="1.4" opacity=".4"/>
+      <path d="M-20 520 C190 470 330 540 520 490 S740 470 830 500" stroke-width="3" opacity=".28"/>
+    </g>
+    <g fill="none" stroke="#fff8ea" stroke-width="3" opacity=".8">
+      <path d="M96 470 V330 A62 62 0 0 1 220 330 V470"/><path d="M118 470 V338 A40 40 0 0 1 198 338 V470" opacity=".7"/><path d="M232 470 V372 A38 38 0 0 1 308 372 V470" opacity=".55"/>
+    </g>
+    <path d="M0 520 C140 470 290 520 440 478 S700 450 800 500 V900 H0Z" fill="#d68a60"/>
+    <path d="M0 600 C130 548 270 612 430 572 S690 540 800 590 V900 H0Z" fill="#b95d3b"/>
+    <path d="M0 690 C160 645 310 700 470 664 S700 650 800 686 V900 H0Z" fill="#7d3f31"/>
+    <path d="M0 780 C190 745 370 795 560 762 S740 752 800 770 V900 H0Z" fill="#43261f"/>
+    <g fill="#f4e6cd" opacity=".85"><circle cx="150" cy="590" r="3"/><circle cx="640" cy="560" r="2.5"/><circle cx="720" cy="640" r="3"/><circle cx="330" cy="650" r="2.5"/><circle cx="560" cy="700" r="3"/></g>
+    <rect width="800" height="900" filter="url(#hGrain)"/>
+  </svg>`;
+}
+
 // Glaze colour from its name (works for any glaze in the seed data); unknown names get a stable colour.
 const GLAZE_COLORS = [[/celadon/, '#9cc5a1'], [/white|ivory|cream/, '#efe9dc'], [/ocean|blue|cobalt|sky|navy/, '#3f78a8'], [/terra|rust|clay/, '#c1633b'], [/ash|grey|gray|smoke/, '#8c9092'],
   [/green|moss|olive|jade/, '#5f8a6b'], [/red|crimson|ruby/, '#a8362f'], [/black|ebony|charcoal/, '#2d2926'], [/yellow|honey|gold|amber|mustard/, '#d9a441'], [/pink|rose|blush/, '#d98ca0'], [/brown|walnut|tenmoku|coffee/, '#7a4b2a'], [/purple|plum|lilac/, '#7b5a94'], [/teal|turquoise/, '#2f8f94']];
@@ -333,17 +364,46 @@ function show() {
   ({ overview: overviewView, paintings: paintingsView, orders: ordersView, bookings: bookingsView, pottery: potteryView })[tab]();
 }
 
-function authView() {
-  $('#main').innerHTML = `<div class="auth">
-    <div class="hero">${artSvg('studio-hero-two', { grain: true })}<div class="copy"><div class="eyebrow" style="color:#fff;opacity:.8">Art Studio</div><h1>Paintings, walls and clay, made one at a time.</h1><p>Acquire an original, book a mural for your wall, or commission handmade pottery.</p></div></div>
-    <div><div class="tabs" role="tablist"><button role="tab" data-tab="login" aria-selected="true">Log in</button><button role="tab" data-tab="signup" aria-selected="false">Create account</button></div>
-      <form class="form" id="login"><label>Email<input name="email" type="email" autocomplete="email" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><button class="btn primary block">Enter the studio</button></form>
-      <form class="form" id="signup" hidden><label>Name<input name="name" maxlength="80" required></label><label>Email<input name="email" type="email" maxlength="120" required></label><label>Password (6 or more characters)<input name="password" type="password" minlength="6" maxlength="200" required></label><button class="btn primary block">Create my account</button></form>
-    </div></div>`;
-  on($('#main'), '[data-tab]', (b) => {
-    for (const t of ['login', 'signup']) { $('#' + t).hidden = t !== b.dataset.tab; }
-    document.querySelectorAll('[data-tab]').forEach((x) => x.setAttribute('aria-selected', x === b ? 'true' : 'false'));
+
+const EYE = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 12S5.5 5 12 5s10.5 7 10.5 7-4 7-10.5 7S1.5 12 1.5 12Z"/><circle cx="12" cy="12" r="3"/></svg>';
+const EYE_OFF = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3l18 18"/><path d="M10.6 5.1A10.7 10.7 0 0 1 12 5c6.5 0 10.5 7 10.5 7a17 17 0 0 1-3.2 3.9M6.6 6.6A17 17 0 0 0 1.5 12S5.5 19 12 19c1.7 0 3.2-.4 4.5-1.1"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>';
+// A password input with a show/hide eye button.
+const pwField = (label, name, autocomplete, extra = '') => `<label>${label}<span class="pw"><input name="${name}" type="password" autocomplete="${autocomplete}" required ${extra}>
+  <button type="button" class="eye" aria-label="Show password" aria-pressed="false">${EYE}</button></span></label>`;
+function wirePasswordEyes(root) {
+  root.querySelectorAll('.pw').forEach((box) => {
+    const input = $('input', box), btn = $('.eye', box);
+    btn.onclick = () => {
+      const show = input.type === 'password';
+      input.type = show ? 'text' : 'password';
+      btn.innerHTML = show ? EYE_OFF : EYE; btn.setAttribute('aria-pressed', String(show)); btn.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
+      input.focus();
+    };
   });
+}
+
+function authView() {
+  const resetToken = (location.hash.match(/^#reset=([a-f0-9]{64})$/) || [])[1] || null;
+  $('#main').innerHTML = `<div class="auth">
+    <div class="hero">${heroSvg()}<div class="copy"><div class="eyebrow" style="color:#fff;opacity:.8">Art Studio</div><h1>Paintings, walls and clay, made one at a time.</h1><p>Acquire an original, book a mural for your wall, or commission handmade pottery.</p></div></div>
+    <div><div class="tabs" id="authtabs" role="tablist"><button role="tab" data-tab="login" aria-selected="true">Log in</button><button role="tab" data-tab="signup" aria-selected="false">Create account</button></div>
+      <form class="form" id="login"><label>Email<input name="email" type="email" autocomplete="email" required></label>${pwField('Password', 'password', 'current-password')}
+        <div class="row" style="justify-content:flex-end;margin-top:-6px"><button type="button" class="link" data-panel="forgot">Forgot password?</button></div><button class="btn primary block">Enter the studio</button></form>
+      <form class="form" id="signup" hidden><label>Name<input name="name" maxlength="80" required></label><label>Email<input name="email" type="email" maxlength="120" required></label>${pwField('Password (6 or more characters)', 'password', 'new-password', 'minlength="6" maxlength="200"')}<button class="btn primary block">Create my account</button></form>
+      <form class="form" id="forgot" hidden><h3 class="serif" style="font-size:34px;font-style:italic">Forgot your password?</h3><p class="muted" style="margin:0">Enter your email and we will send you a link to choose a new one. The link works once and expires in 30 minutes.</p>
+        <label>Email<input name="email" type="email" autocomplete="email" maxlength="120" required></label><div id="forgotmsg"></div><button class="btn primary block">Send reset link</button><div class="row" style="justify-content:center"><button type="button" class="link" data-panel="login">Back to log in</button></div></form>
+      <form class="form" id="reset" hidden><h3 class="serif" style="font-size:34px;font-style:italic">Choose a new password</h3>${pwField('New password (6 or more characters)', 'password', 'new-password', 'minlength="6" maxlength="200"')}${pwField('Confirm new password', 'confirm', 'new-password', 'minlength="6" maxlength="200"')}
+        <button class="btn primary block">Save new password</button><div class="row" style="justify-content:center"><button type="button" class="link" data-panel="login">Back to log in</button></div></form>
+    </div></div>`;
+  wirePasswordEyes($('#main'));
+  const panel = (name) => {
+    for (const p of ['login', 'signup', 'forgot', 'reset']) $('#' + p).hidden = p !== name;
+    $('#authtabs').hidden = name === 'forgot' || name === 'reset';
+    document.querySelectorAll('[data-tab]').forEach((x) => x.setAttribute('aria-selected', x.dataset.tab === name ? 'true' : 'false'));
+    $('#' + name + ' input')?.focus();
+  };
+  on($('#main'), '[data-tab]', (b) => panel(b.dataset.tab));
+  on($('#main'), '[data-panel]', (b) => panel(b.dataset.panel));
   for (const [id, path] of [['login', '/auth/login'], ['signup', '/auth/signup']]) {
     $('#' + id).onsubmit = async (e) => {
       e.preventDefault();
@@ -352,6 +412,27 @@ function authView() {
       catch (err) { toast(err.message, 'err'); btn.disabled = false; }
     };
   }
+  $('#forgot').onsubmit = async (e) => {
+    e.preventDefault();
+    const btn = $('button.primary', e.target), email = e.target.email.value; btn.disabled = true;
+    try {
+      const r = await api('POST', '/auth/forgot', { email });
+      $('#forgotmsg').innerHTML = `<div class="demo-note" role="status"><b>Check your inbox.</b> If an account exists for ${esc(email)}, a reset link is on its way.${r.delivery === 'console' ? '<br><br><b>Running locally?</b> No email service is connected, so the link was printed in the terminal where the server is running.' : ''}</div>`;
+    } catch (err) { toast(err.message, 'err'); }
+    btn.disabled = false;
+  };
+  $('#reset').onsubmit = async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    if (f.password.value !== f.confirm.value) return toast('The two passwords do not match.', 'err');
+    const btn = $('button.primary', f); btn.disabled = true;
+    try {
+      await api('POST', '/auth/reset', { token: resetToken, password: f.password.value });
+      history.replaceState(null, '', location.pathname); f.reset(); panel('login'); toast('Password updated. Please log in with your new password.', 'ok');
+    } catch (err) { toast(err.message, 'err'); }
+    btn.disabled = false;
+  };
+  if (resetToken) panel('reset');
 }
 
 const head = (eyebrow, title, sub, extra = '') => `<div class="page-head"><div><div class="eyebrow">${esc(eyebrow)}</div><h2>${esc(title)}</h2>${sub ? `<p>${esc(sub)}</p>` : ''}</div><div>${extra}</div></div>`;
@@ -635,6 +716,7 @@ function potteryView() {
 }
 
 /* ============================ boot ============================ */
+window.addEventListener('hashchange', () => { if (!me && /^#reset=/.test(location.hash)) authView(); });
 (async () => {
   $('#main').innerHTML = '<div class="state"><div class="skeleton" style="height:240px"></div></div>';
   try { me = await api('GET', '/me'); config = await api('GET', '/seed'); if (me.role === 'admin') tab = 'overview'; } catch { me = null; }

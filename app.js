@@ -1,5 +1,5 @@
 import express from 'express';
-import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { randomBytes, scryptSync, timingSafeEqual, createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
@@ -36,6 +36,11 @@ function sniffImage(b) {
 export function createApp(db, options = {}) {
   const today = options.today || realToday;
   const adapter = options.adapter || adapterFromEnv();
+  // No email service is connected, so reset links go to the server console. Swap `send` for SMTP to email them.
+  const mailer = options.mailer || {
+    mode: 'console',
+    send: async ({ to, link }) => console.log(`\nPassword reset requested for ${to}\nOpen this link within 30 minutes: ${link}\n`),
+  };
   const uploadDir = options.uploadDir || process.env.UPLOAD_DIR || fileURLToPath(new URL('./uploads', import.meta.url));
   mkdirSync(uploadDir, { recursive: true });
 
@@ -103,10 +108,10 @@ export function createApp(db, options = {}) {
   const failures = new Map();
   const WINDOW = 15 * 60 * 1000, MAX_FAILS = 10;
   const failKey = (req, email) => `${req.ip}|${String(email).toLowerCase()}`;
-  const tooMany = (key) => {
+  const tooMany = (key, max = MAX_FAILS) => {
     const f = failures.get(key);
     if (f && Date.now() - f.first > WINDOW) failures.delete(key);
-    return (failures.get(key)?.count || 0) >= MAX_FAILS;
+    return (failures.get(key)?.count || 0) >= max;
   };
   const recordFail = (key) => {
     const f = failures.get(key);
@@ -160,6 +165,43 @@ export function createApp(db, options = {}) {
     const t = cookieToken(req);
     if (t) db.prepare('DELETE FROM sessions WHERE token = ?').run(t);
     res.setHeader('Set-Cookie', 'session=; HttpOnly; Path=/; Max-Age=0');
+    res.json({ ok: true });
+  });
+
+
+  // ---------- password reset: emailed single-use link, valid 30 minutes ----------
+  const RESET_MINUTES = 30;
+  const sha256 = (s) => createHash('sha256').update(s).digest('hex');
+  app.post('/api/auth/forgot', ah(async (req, res) => {
+    const email = text(req.body?.email, 'Email', { min: 1, max: 120 }).toLowerCase();
+    const key = `forgot|${failKey(req, email)}`;
+    if (tooMany(key, 5)) throw new HttpError(429, 'Too many requests. Try again in 15 minutes.');
+    recordFail(key);
+    const u = db.prepare('SELECT id, email FROM users WHERE email = ?').get(email);
+    if (u) {
+      const token = randomBytes(32).toString('hex');
+      db.prepare('DELETE FROM password_resets WHERE user_id = ? OR expires_at <= datetime(\'now\')').run(u.id);
+      db.prepare(`INSERT INTO password_resets (token_hash, user_id, expires_at) VALUES (?,?,datetime('now','+${RESET_MINUTES} minutes'))`).run(sha256(token), u.id);
+      const base = process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`;
+      await mailer.send({ to: u.email, link: `${base}/#reset=${token}` });
+    }
+    // Same answer whether or not the account exists, so this cannot be used to find registered emails.
+    res.json({ ok: true, delivery: mailer.mode });
+  }));
+  app.post('/api/auth/reset', (req, res) => {
+    const { token, password } = req.body || {};
+    const key = `reset|${req.ip}`;
+    if (tooMany(key)) throw new HttpError(429, 'Too many attempts. Try again in 15 minutes.');
+    if (typeof password !== 'string' || password.length < 6) throw bad('Password must be at least 6 characters');
+    if (password.length > 200) throw bad('Password is too long');
+    tx(() => {
+      const row = typeof token === 'string' && /^[a-f0-9]{64}$/.test(token)
+        ? db.prepare("SELECT * FROM password_resets WHERE token_hash = ? AND expires_at > datetime('now')").get(sha256(token)) : null;
+      if (!row) { recordFail(key); throw bad('This reset link is invalid or has expired. Please request a new one.'); }
+      db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(password), row.user_id);
+      db.prepare('DELETE FROM password_resets WHERE user_id = ?').run(row.user_id); // single use
+      db.prepare('DELETE FROM sessions WHERE user_id = ?').run(row.user_id);        // sign out everywhere
+    });
     res.json({ ok: true });
   });
 

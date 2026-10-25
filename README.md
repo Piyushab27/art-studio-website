@@ -46,6 +46,10 @@ Starts the app on a temporary database with a frozen clock and checks 401/403/40
 - `public/`: `index.html`, `styles.css` and `app.js` (the whole UI)
 - `test/smoke.js`: end-to-end checks
 
+## Forgot password
+
+"Forgot password?" on the login page asks for an email and sends a single-use link that lasts 30 minutes. No email service is connected, so the link is **printed in the terminal where the server is running**; open it to choose a new password. To email it for real, replace the `send` function in the `mailer` at the top of `createApp` in `app.js` with your SMTP or email API call. Resetting signs the account out everywhere. Only a hash of the token is stored, and the page gives the same answer whether or not the email has an account.
+
 ## Payments (Razorpay)
 
 Set `RAZORPAY_KEY_ID` and `RAZORPAY_KEY_SECRET` (test keys) and the real Razorpay checkout opens. The server creates the Razorpay order, and the payment counts only after it verifies Razorpay's signature (HMAC-SHA256 of `order_id|payment_id`) with the secret. The secret never reaches the browser. Cancelling a paid order or booking refunds it through the Razorpay API.
