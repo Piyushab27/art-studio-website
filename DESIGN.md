@@ -12,10 +12,18 @@ Two layers, both in the database. Buying runs in a transaction that does `UPDATE
 ## 4. What did you finish, what did you leave out, and what would you do next?
 **Finished:** sign-up, login and logout; both roles with server-side checks; browsing, adding and editing paintings (only while available), buying and cancelling orders; wall bookings with the 7-90 day window, 10-500 sq ft, one booking per date, price from the rate, admin confirm or decline, and customer cancel until 3 days before; pottery requests with item and glaze validation, quantity 1-12, needed-by at least 14 days away, admin accept or decline, and customer edit or cancel only while requested; loading, empty and error states on every data screen, with clear refusal messages.
 
-**Extras:** status history with studio notes, painting delete (only when it has no orders), search and filters, paging, and a frozen-clock test suite.
+**Extras:** Razorpay payments with signature verification and refunds, a live map with delivery and job tracking, painting image uploads, generated artwork for everything else, a gallery-style interface,  status history with studio notes, painting delete (only when it has no orders), search and filters, paging, and a frozen-clock test suite.
 
-**Left out (as the brief allows):** payments, password reset, email verification, social login, studio sign-up, image uploads, notifications, deployment and Docker.
+**Left out:** password reset, email verification, social login, studio sign-up, email or SMS notifications, Razorpay webhooks (the browser reports the result and the server verifies the signature), deployment and Docker.
 
 **Caveats:** the official `seedData.zip` was not available when I built this, so `data/seed.json` holds placeholder values (wall rate ₹45/sq ft, five pottery items, five glazes, four paintings). Swapping in the real file should only need the same field names. Day counts use the studio time zone (`APP_TIMEZONE`, default IST), so they do not depend on the server's clock settings.
 
 **Next:** use the real seed data, add a full CSRF token (the Origin check covers modern browsers), move to a hosted database, and add browser-level tests for the UI.
+
+## Extras: payments, maps and images
+
+**Payments.** A `payments` table records each Razorpay order. `POST /api/payments/create` makes the order for something the customer owns and that is ready to pay for (an order that is placed, a booking that is confirmed, a pottery request that is accepted). `POST /api/payments/verify` recomputes the HMAC signature on the server and only then marks the record paid. If the item was cancelled while the customer was paying, the money is refunded straight away. Cancelling a paid order or booking sets it to `refund_pending`, calls the refund API, then sets it to `refunded`, and the studio can retry a failed refund. With no keys the same flow runs on a demo provider behind the same interface.
+
+**Live tracking.** The `tracking` table holds each delivery's or job's current stage and last position. The studio updates it by changing stage, posting real GPS coordinates, or starting a server-side simulation that walks a marker from the studio to the customer's pin. Customers poll every 3 seconds and only see their own records (404 otherwise).
+
+**Images.** Uploads are read as raw bytes, limited to 5 MB, identified by magic bytes, stored under a random name, and served with `nosniff`. The old file is deleted when it is replaced or the painting is deleted.

@@ -3,16 +3,20 @@
 import assert from 'node:assert/strict';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { mkdtempSync, existsSync } from 'node:fs';
+import { createHmac } from 'node:crypto';
 
 process.env.ADMIN_EMAIL = 'studio@example.com';
 process.env.ADMIN_PASSWORD = 'test-admin-pw';
 const { openDb, seed } = await import('../db.js');
 const { createApp } = await import('../app.js');
+const { razorpayAdapter } = await import('../payments.js');
 
 const TODAY = '2026-10-25'; // frozen "today"
 const iso = (n) => new Date(Date.UTC(2026, 9, 25 + n)).toISOString().slice(0, 10);
 const db = openDb(join(tmpdir(), `studio-test-${Date.now()}.db`));
-const server = createApp(db, { today: () => TODAY }).listen(0);
+const uploadDir = mkdtempSync(join(tmpdir(), 'studio-uploads-'));
+const server = createApp(db, { today: () => TODAY, uploadDir, simulationStepMs: 15, simulationSteps: 3 }).listen(0);
 const base = `http://localhost:${server.address().port}`;
 const rate = seed.wallRatePerSqFt;
 const item = seed.potteryItems[0], glaze = seed.glazes[0];
@@ -153,6 +157,130 @@ test('cross-site requests are refused', async () => {
 test('input length caps', async () => {
   assert.equal((await call(admin, 'POST', '/api/paintings', { title: 'x'.repeat(121), price: 5 })).status, 400);
   assert.equal((await call(null, 'POST', '/api/auth/signup', { name: 'n'.repeat(81), email: 'long@t.com', password: 'secret1' })).status, 400);
+});
+
+const PIN = { address: '12 Main Street, Hyderabad', lat: 17.41, lng: 78.45 };
+const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
+async function upload(who, id, body, type = 'image/png') {
+  const r = await fetch(`${base}/api/paintings/${id}/image`, { method: 'POST', headers: { 'content-type': type, cookie: who.cookie }, body });
+  return { status: r.status, body: await r.json() };
+}
+async function pay(who, kind, id) {
+  const c = await call(who, 'POST', '/api/payments/create', { kind, id });
+  if (c.status !== 201) return { create: c };
+  const v = await call(who, 'POST', '/api/payments/verify', { razorpayOrderId: c.body.razorpayOrderId, razorpayPaymentId: 'pay_mock_' + Math.random().toString(36).slice(2), razorpaySignature: '' });
+  return { create: c, verify: v };
+}
+const newPainting = async (price = 500) => (await call(admin, 'POST', '/api/paintings', { title: 'P' + Math.random(), price })).body.id;
+
+test('single-record routes: owner or studio gets 200, other customers get 404', async () => {
+  const pid = await newPainting();
+  const o = await call(a, 'POST', '/api/orders', { paintingId: pid, ...PIN });
+  assert.equal(o.status, 201); assert.equal(o.body.delivery_address, PIN.address); assert.equal(o.body.lat, PIN.lat);
+  assert.equal((await call(a, 'GET', `/api/orders/${o.body.id}`)).status, 200);
+  assert.equal((await call(admin, 'GET', `/api/orders/${o.body.id}`)).status, 200);
+  assert.equal((await call(b, 'GET', `/api/orders/${o.body.id}`)).status, 404);
+  assert.equal((await call(a, 'GET', '/api/orders/99999')).status, 404);
+  assert.equal((await call(a, 'GET', `/api/paintings/${pid}`)).status, 200);
+  assert.equal((await call(a, 'GET', '/api/paintings/99999')).status, 404);
+  const bk = await call(a, 'POST', '/api/bookings', { date: iso(40), wallSqFt: 30, address: '12 Main Street', lat: 17.4, lng: 78.4 });
+  assert.equal((await call(a, 'GET', `/api/bookings/${bk.body.id}`)).status, 200);
+  assert.equal((await call(b, 'GET', `/api/bookings/${bk.body.id}`)).status, 404);
+  const po = await call(a, 'POST', '/api/pottery', { item: item.name, glaze, quantity: 1, neededBy: iso(20) });
+  assert.equal((await call(a, 'GET', `/api/pottery/${po.body.id}`)).status, 200);
+  assert.equal((await call(b, 'GET', `/api/pottery/${po.body.id}`)).status, 404);
+  assert.equal((await call(a, 'POST', '/api/orders', { paintingId: await newPainting(), lat: 999, lng: 0 })).status, 400);
+});
+
+test('image upload: studio only, real images only, replaced file is removed', async () => {
+  const pid = await newPainting();
+  assert.equal((await upload(a, pid, PNG)).status, 403);
+  assert.equal((await upload(admin, pid, Buffer.from('not an image at all'))).status, 415);
+  const ok = await upload(admin, pid, PNG);
+  assert.equal(ok.status, 200); assert.match(ok.body.image_url, /^\/uploads\/[a-f0-9]+\.png$/);
+  const served = await fetch(base + ok.body.image_url);
+  assert.equal(served.status, 200); assert.equal(served.headers.get('x-content-type-options'), 'nosniff');
+  const second = await upload(admin, pid, PNG);
+  assert.notEqual(second.body.image_url, ok.body.image_url);
+  assert.equal(existsSync(join(uploadDir, ok.body.image_url.split('/').pop())), false);
+  assert.equal((await call(a, 'POST', '/api/orders', { paintingId: pid })).status, 201);
+  assert.equal((await upload(admin, pid, PNG)).status, 409); // sold -> locked
+});
+
+test('payments: pay an order, no double pay, refund on cancel, ownership', async () => {
+  const pid = await newPainting(1200);
+  const o = (await call(a, 'POST', '/api/orders', { paintingId: pid })).body;
+  assert.equal(o.payment_status, 'unpaid');
+  assert.equal((await call(admin, 'POST', '/api/payments/create', { kind: 'orders', id: o.id })).status, 403);
+  assert.equal((await call(b, 'POST', '/api/payments/create', { kind: 'orders', id: o.id })).status, 404);
+  assert.equal((await call(a, 'POST', '/api/payments/create', { kind: 'nope', id: 1 })).status, 400);
+  const c = await call(a, 'POST', '/api/payments/create', { kind: 'orders', id: o.id });
+  assert.equal(c.status, 201); assert.equal(c.body.amount, 120000); assert.equal(c.body.mode, 'mock');
+  // forged / unverifiable payment is rejected and does not mark anything paid
+  assert.equal((await call(a, 'POST', '/api/payments/verify', { razorpayOrderId: c.body.razorpayOrderId, razorpayPaymentId: 'pay_fake', razorpaySignature: 'x' })).status, 400);
+  assert.equal((await call(a, 'GET', `/api/orders/${o.id}`)).body.payment_status, 'unpaid');
+  const done = await pay(a, 'orders', o.id);
+  assert.equal(done.verify.status, 200);
+  assert.equal((await call(a, 'GET', `/api/orders/${o.id}`)).body.payment_status, 'paid');
+  assert.equal((await call(a, 'POST', '/api/payments/create', { kind: 'orders', id: o.id })).status, 409); // already paid
+  assert.equal((await call(b, 'POST', '/api/payments/verify', { razorpayOrderId: c.body.razorpayOrderId, razorpayPaymentId: 'pay_mock_z', razorpaySignature: '' })).status, 404);
+  const rev = (await call(admin, 'GET', '/api/admin/summary')).body.revenue;
+  assert.ok(rev >= 1200);
+  const cancelled = await call(a, 'POST', `/api/orders/${o.id}/cancel`);
+  assert.equal(cancelled.body.status, 'cancelled'); assert.equal(cancelled.body.payment_status, 'refunded');
+  assert.equal((await call(admin, 'GET', '/api/admin/summary')).body.revenue, rev - 1200);
+  assert.equal((await call(a, 'POST', '/api/payments/create', { kind: 'orders', id: o.id })).status, 409); // cancelled
+});
+
+test('payments: bookings payable only once confirmed; pottery only once accepted', async () => {
+  const bk = (await call(a, 'POST', '/api/bookings', { date: iso(45), wallSqFt: 40, address: '12 Main Street', ...PIN })).body;
+  assert.equal((await pay(a, 'bookings', bk.id)).create.status, 409);
+  await call(admin, 'POST', `/api/bookings/${bk.id}/confirm`);
+  assert.equal((await pay(a, 'bookings', bk.id)).verify.status, 200);
+  assert.equal((await call(a, 'POST', `/api/bookings/${bk.id}/cancel`)).body.payment_status, 'refunded');
+  const po = (await call(a, 'POST', '/api/pottery', { item: item.name, glaze, quantity: 2, neededBy: iso(30) })).body;
+  assert.equal((await pay(a, 'pottery', po.id)).create.status, 409);
+  await call(admin, 'POST', `/api/pottery/${po.id}/accept`);
+  assert.equal((await pay(a, 'pottery', po.id)).verify.status, 200);
+  assert.equal((await call(a, 'GET', `/api/pottery/${po.id}`)).body.payment_status, 'paid');
+});
+
+test('razorpay signature check accepts only the correct HMAC', () => {
+  const rz = razorpayAdapter({ keyId: 'rzp_test_x', keySecret: 'topsecret' });
+  const sig = createHmac('sha256', 'topsecret').update('order_1|pay_1').digest('hex');
+  assert.equal(rz.verify({ orderId: 'order_1', paymentId: 'pay_1', signature: sig }), true);
+  assert.equal(rz.verify({ orderId: 'order_1', paymentId: 'pay_2', signature: sig }), false);
+  assert.equal(rz.verify({ orderId: 'order_1', paymentId: 'pay_1', signature: 'abc' }), false);
+  assert.equal(rz.verify({ orderId: 'order_1', paymentId: 'pay_1', signature: undefined }), false);
+});
+
+test('live tracking: stages, location, ownership and simulated route', async () => {
+  const bk = (await call(a, 'POST', '/api/bookings', { date: iso(50), wallSqFt: 25, address: '12 Main Street', ...PIN })).body;
+  assert.equal((await call(admin, 'POST', `/api/tracking/bookings/${bk.id}/stage`, { stage: 'on_the_way' })).status, 409); // not confirmed yet
+  await call(admin, 'POST', `/api/bookings/${bk.id}/confirm`);
+  const t0 = (await call(a, 'GET', `/api/tracking/bookings/${bk.id}`)).body;
+  assert.equal(t0.stage, 'scheduled'); assert.equal(t0.position, null); assert.equal(t0.destination.lat, PIN.lat);
+  assert.equal((await call(b, 'GET', `/api/tracking/bookings/${bk.id}`)).status, 404);
+  assert.equal((await call(a, 'POST', `/api/tracking/bookings/${bk.id}/stage`, { stage: 'on_the_way' })).status, 403);
+  assert.equal((await call(admin, 'POST', `/api/tracking/bookings/${bk.id}/stage`, { stage: 'flying' })).status, 400);
+  assert.equal((await call(admin, 'POST', `/api/tracking/bookings/${bk.id}/location`, { lat: 200, lng: 0 })).status, 400);
+  const moving = (await call(admin, 'POST', `/api/tracking/bookings/${bk.id}/stage`, { stage: 'on_the_way' })).body;
+  assert.equal(moving.stage, 'on_the_way'); assert.ok(moving.position);
+  const gps = (await call(admin, 'POST', `/api/tracking/bookings/${bk.id}/location`, { lat: 17.39, lng: 78.48 })).body;
+  assert.equal(gps.position.lat, 17.39);
+  assert.equal((await call(admin, 'POST', `/api/tracking/bookings/${bk.id}/simulate`)).status, 202);
+  await new Promise((r) => setTimeout(r, 200));
+  const end = (await call(a, 'GET', `/api/tracking/bookings/${bk.id}`)).body;
+  assert.equal(end.stage, 'arrived'); assert.equal(end.simulating, false); assert.equal(end.position.lat, PIN.lat);
+  const all = (await call(admin, 'GET', '/api/tracking')).body;
+  assert.ok(all.items.some((i) => i.kind === 'bookings' && i.id === bk.id));
+  assert.equal((await call(a, 'GET', '/api/tracking')).status, 403);
+  assert.deepEqual((await call(a, 'GET', `/api/history/bookings/${bk.id}`)).body.map((h) => h.status).slice(-2), ['on_the_way', 'arrived']);
+  // an order without a pin cannot be simulated
+  const o = (await call(a, 'POST', '/api/orders', { paintingId: await newPainting() })).body;
+  assert.equal((await call(admin, 'POST', `/api/tracking/orders/${o.id}/simulate`)).status, 409);
+  assert.equal((await call(admin, 'POST', `/api/tracking/orders/${o.id}/stage`, { stage: 'out_for_delivery' })).body.stage, 'out_for_delivery');
+  assert.equal((await call(admin, 'POST', `/api/tracking/nothing/1/stage`, { stage: 'x' })).status, 404);
 });
 
 let failed = 0;

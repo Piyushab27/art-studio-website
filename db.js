@@ -59,11 +59,32 @@ export function openDb(file = process.env.DB_FILE || 'studio.db') {
       note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
     CREATE INDEX IF NOT EXISTS events_by_record ON status_events(kind, record_id);
   `);
-  // Databases created by an earlier version lack the note column.
-  for (const t of ['bookings', 'pottery_requests']) {
-    if (!db.prepare(`PRAGMA table_info(${t})`).all().some((c) => c.name === 'note'))
-      db.exec(`ALTER TABLE ${t} ADD COLUMN note TEXT NOT NULL DEFAULT ''`);
-  }
+  // Columns added after the first version. CREATE TABLE above already has the originals.
+  const ensureColumn = (table, col, ddl) => {
+    if (!db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col))
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${ddl}`);
+  };
+  ensureColumn('bookings', 'note', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('pottery_requests', 'note', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('paintings', 'image', 'TEXT');
+  for (const t of ['orders', 'bookings', 'pottery_requests']) ensureColumn(t, 'payment_status', "TEXT NOT NULL DEFAULT 'unpaid'");
+  ensureColumn('orders', 'delivery_address', "TEXT NOT NULL DEFAULT ''");
+  for (const t of ['orders', 'bookings']) { ensureColumn(t, 'lat', 'REAL'); ensureColumn(t, 'lng', 'REAL'); }
+  db.exec(`
+    -- One row per payment attempt (Razorpay order). kind + record_id point at the thing being paid for.
+    CREATE TABLE IF NOT EXISTS payments (
+      id INTEGER PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('orders','bookings','pottery')),
+      record_id INTEGER NOT NULL, user_id INTEGER NOT NULL REFERENCES users(id),
+      amount INTEGER NOT NULL, provider_order_id TEXT NOT NULL UNIQUE, provider_payment_id TEXT,
+      status TEXT NOT NULL DEFAULT 'created' CHECK (status IN ('created','paid','failed','refunded')),
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+    CREATE INDEX IF NOT EXISTS payments_by_record ON payments(kind, record_id);
+    -- Live tracking: current stage and last known position of a delivery or a wall job.
+    CREATE TABLE IF NOT EXISTS tracking (
+      kind TEXT NOT NULL CHECK (kind IN ('orders','bookings')), record_id INTEGER NOT NULL,
+      stage TEXT NOT NULL, lat REAL, lng REAL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (kind, record_id));
+  `);
   db.exec(`DELETE FROM sessions WHERE created_at <= datetime('now', '-${SESSION_DAYS} days')`);
 
   // Studio account is seeded (studio sign-up is out of scope).

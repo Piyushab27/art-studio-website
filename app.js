@@ -1,45 +1,14 @@
 import express from 'express';
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
+import { join } from 'node:path';
 import { hashPassword, seed, SESSION_DAYS } from './db.js';
+import { HttpError, bad, conflict, notFound, intIn, text, coords, daysBetween, realToday } from './lib.js';
+import { createPayments, adapterFromEnv } from './payments.js';
+import { createTracking } from './tracking.js';
 
-class HttpError extends Error {
-  constructor(status, message) { super(message); this.status = status; }
-}
-const bad = (m) => new HttpError(400, m);
-const conflict = (m) => new HttpError(409, m);
-const notFound = () => new HttpError(404, 'Not found');
-
-const DAY = 86400000;
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-const TIMEZONE = process.env.APP_TIMEZONE || 'Asia/Kolkata';
 const PAGE_SIZE = 50;
-
-// Today's calendar date in the studio's time zone, as YYYY-MM-DD.
-const realToday = () => new Intl.DateTimeFormat('en-CA', { timeZone: TIMEZONE }).format(new Date());
-
-// Whole days from `today` to a YYYY-MM-DD string; null if it is not a real date.
-function daysBetween(today, s) {
-  if (typeof s !== 'string' || !DATE_RE.test(s)) return null;
-  const [y, m, d] = s.split('-').map(Number);
-  const t = Date.UTC(y, m - 1, d);
-  const dt = new Date(t);
-  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== m - 1 || dt.getUTCDate() !== d) return null;
-  const [ty, tm, td] = today.split('-').map(Number);
-  return Math.round((t - Date.UTC(ty, tm - 1, td)) / DAY);
-}
-
-function intIn(v, lo, hi, name) {
-  const n = typeof v === 'string' && v.trim() !== '' ? Number(v) : v;
-  if (!Number.isInteger(n) || n < lo || n > hi) throw bad(`${name} must be a whole number from ${lo} to ${hi}`);
-  return n;
-}
-function text(v, name, { max, min = 0 }) {
-  const s = String(v ?? '').trim();
-  if (s.length < min) throw bad(min === 1 ? `${name} is required` : `${name} must be at least ${min} characters`);
-  if (s.length > max) throw bad(`${name} must be at most ${max} characters`);
-  return s;
-}
 
 function verifyPassword(password, stored) {
   const [salt, hash] = stored.split(':');
@@ -53,10 +22,33 @@ function cookieToken(req) {
   return m ? m[1] : null;
 }
 
+// Identify an uploaded image by its first bytes, never by what the client claims.
+function sniffImage(b) {
+  if (b.length > 8 && b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'png';
+  if (b.length > 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'jpg';
+  if (b.length > 12 && b.subarray(0, 4).toString() === 'RIFF' && b.subarray(8, 12).toString() === 'WEBP') return 'webp';
+  if (b.length > 6 && ['GIF87a', 'GIF89a'].includes(b.subarray(0, 6).toString())) return 'gif';
+  return null;
+}
+
 // options.today: () => 'YYYY-MM-DD' lets tests freeze the clock.
-export function createApp(db, { today = realToday } = {}) {
+// options.adapter: payment provider (defaults to Razorpay when keys are set, else the demo provider).
+export function createApp(db, options = {}) {
+  const today = options.today || realToday;
+  const adapter = options.adapter || adapterFromEnv();
+  const uploadDir = options.uploadDir || process.env.UPLOAD_DIR || fileURLToPath(new URL('./uploads', import.meta.url));
+  mkdirSync(uploadDir, { recursive: true });
+
   const app = express();
+  app.disable('x-powered-by');
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+    next();
+  });
   app.use(express.json({ limit: '20kb' }));
+  app.use('/uploads', express.static(uploadDir, { maxAge: '7d', immutable: true }));
   app.use(express.static(fileURLToPath(new URL('./public', import.meta.url))));
 
   // Run fn inside a write transaction so multi-statement changes are all-or-nothing.
@@ -69,6 +61,7 @@ export function createApp(db, { today = realToday } = {}) {
   const daysAway = (s) => daysBetween(today(), s);
   const logEvent = (kind, id, status, actorId, note = '') =>
     db.prepare('INSERT INTO status_events (kind, record_id, status, actor_id, note) VALUES (?,?,?,?,?)').run(kind, id, status, actorId, note);
+  const ah = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next); // async handlers -> error middleware
 
   // ---------- CSRF: refuse state-changing requests that come from another site ----------
   app.use('/api', (req, _res, next) => {
@@ -128,6 +121,9 @@ export function createApp(db, { today = realToday } = {}) {
     return [limit, offset];
   };
 
+  const payments = createPayments({ db, tx, adapter, logEvent });
+  const tracking = createTracking({ db, logEvent, options });
+
   // ---------- auth routes ----------
   app.post('/api/auth/signup', (req, res) => {
     const b = req.body || {};
@@ -169,9 +165,15 @@ export function createApp(db, { today = realToday } = {}) {
 
   app.get('/api/me', requireAuth, (req, res) => res.json(req.user));
   app.get('/api/seed', requireAuth, (_req, res) =>
-    res.json({ wallRatePerSqFt: seed.wallRatePerSqFt, potteryItems: seed.potteryItems, glazes: seed.glazes, today: today() }));
+    res.json({
+      wallRatePerSqFt: seed.wallRatePerSqFt, potteryItems: seed.potteryItems, glazes: seed.glazes, today: today(),
+      studio: tracking.studio, paymentMode: adapter.mode,
+    }));
 
   // ---------- paintings (search: ?q=&status=&min=&max=) ----------
+  const shapePainting = (p) => p && { ...p, image_url: p.image ? `/uploads/${p.image}` : null };
+  const getPainting = (id) => shapePainting(db.prepare('SELECT * FROM paintings WHERE id = ?').get(id));
+
   app.get('/api/paintings', requireAuth, (req, res) => {
     const where = [], args = [];
     const q = String(req.query.q || '').trim();
@@ -181,7 +183,12 @@ export function createApp(db, { today = realToday } = {}) {
     if (req.query.max !== undefined && req.query.max !== '' && Number.isFinite(Number(req.query.max))) { where.push('price <= ?'); args.push(Number(req.query.max)); }
     const [limit, offset] = paging(req);
     res.json(db.prepare(`SELECT * FROM paintings ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY id DESC LIMIT ? OFFSET ?`)
-      .all(...args, limit, offset));
+      .all(...args, limit, offset).map(shapePainting));
+  });
+  app.get('/api/paintings/:id', requireAuth, (req, res) => {
+    const p = getPainting(req.params.id);
+    if (!p) throw notFound();
+    res.json(p);
   });
 
   function paintingBody(b) {
@@ -189,72 +196,109 @@ export function createApp(db, { today = realToday } = {}) {
     return [text(b.title, 'Title', { min: 1, max: 120 }), text(b.artist, 'Artist', { max: 80 }),
       text(b.description, 'Description', { max: 500 }), intIn(b.price, 1, 10_000_000, 'Price')];
   }
+  const removeFile = (name) => { if (name) try { unlinkSync(join(uploadDir, name)); } catch { /* already gone */ } };
+
   app.post('/api/paintings', admin, (req, res) => {
     const r = db.prepare('INSERT INTO paintings (title, artist, description, price) VALUES (?,?,?,?)').run(...paintingBody(req.body));
-    res.status(201).json(db.prepare('SELECT * FROM paintings WHERE id = ?').get(r.lastInsertRowid));
+    res.status(201).json(getPainting(r.lastInsertRowid));
   });
   app.put('/api/paintings/:id', admin, (req, res) => {
     const vals = paintingBody(req.body);
-    const r = tx(() => {
+    tx(() => {
       const p = db.prepare('SELECT * FROM paintings WHERE id = ?').get(req.params.id);
       if (!p) throw notFound();
       if (p.status !== 'available') throw conflict('A sold painting cannot be edited');
       db.prepare('UPDATE paintings SET title=?, artist=?, description=?, price=? WHERE id=?').run(...vals, p.id);
-      return db.prepare('SELECT * FROM paintings WHERE id = ?').get(p.id);
     });
-    res.json(r);
+    res.json(getPainting(req.params.id));
   });
+  // Image upload: raw bytes in the body (PNG, JPEG, WebP or GIF, up to 5 MB). Only while the painting is still available.
+  app.post('/api/paintings/:id/image',
+    admin, express.raw({ type: ['image/png', 'image/jpeg', 'image/webp', 'image/gif'], limit: '5mb' }),
+    (req, res) => {
+      const buf = req.body;
+      const ext = Buffer.isBuffer(buf) && buf.length ? sniffImage(buf) : null;
+      if (!ext) throw new HttpError(415, 'Please upload a PNG, JPEG, WebP or GIF image (max 5 MB)');
+      let old = null, name = null;
+      tx(() => {
+        const p = db.prepare('SELECT * FROM paintings WHERE id = ?').get(req.params.id);
+        if (!p) throw notFound();
+        if (p.status !== 'available') throw conflict('A sold painting cannot be edited');
+        name = `${randomBytes(12).toString('hex')}.${ext}`;
+        writeFileSync(join(uploadDir, name), buf);
+        old = p.image;
+        db.prepare('UPDATE paintings SET image=? WHERE id=?').run(name, p.id);
+      });
+      removeFile(old);
+      res.json(getPainting(req.params.id));
+    });
   // Delete is only for a painting that never had an order; anything with history stays for the record.
   app.delete('/api/paintings/:id', admin, (req, res) => {
+    let image = null;
     tx(() => {
       const p = db.prepare('SELECT * FROM paintings WHERE id = ?').get(req.params.id);
       if (!p) throw notFound();
       if (p.status !== 'available') throw conflict('A sold painting cannot be deleted');
       if (db.prepare('SELECT 1 FROM orders WHERE painting_id = ?').get(p.id)) throw conflict('This painting has order history, so it cannot be deleted');
+      image = p.image;
       db.prepare('DELETE FROM paintings WHERE id = ?').run(p.id);
     });
+    removeFile(image);
     res.json({ ok: true });
   });
 
   // ---------- orders ----------
-  const orderSelect = `SELECT o.*, p.title AS painting_title, u.name AS customer_name, u.email AS customer_email
-    FROM orders o JOIN paintings p ON p.id = o.painting_id JOIN users u ON u.id = o.user_id`;
+  const orderSelect = `SELECT o.*, p.title AS painting_title, p.image AS painting_image, u.name AS customer_name, u.email AS customer_email,
+      COALESCE(t.stage, 'processing') AS stage
+    FROM orders o JOIN paintings p ON p.id = o.painting_id JOIN users u ON u.id = o.user_id
+    LEFT JOIN tracking t ON t.kind = 'orders' AND t.record_id = o.id`;
+  const shapeOrder = (o) => o && { ...o, painting_image_url: o.painting_image ? `/uploads/${o.painting_image}` : null };
+  const getOrder = (id) => shapeOrder(db.prepare(`${orderSelect} WHERE o.id = ?`).get(id));
+  const ownerOrAdmin = (req, row) => { if (!row || (req.user.role !== 'admin' && row.user_id !== req.user.id)) throw notFound(); return row; };
 
   app.post('/api/orders', customer, (req, res) => {
     const pid = Number(req.body?.paintingId);
     if (!Number.isInteger(pid)) throw bad('paintingId is required');
+    const address = text(req.body?.address, 'Delivery address', { max: 300 });
+    const [lat, lng] = coords(req.body?.lat, req.body?.lng);
     const id = tx(() => {
       const p = db.prepare('SELECT * FROM paintings WHERE id = ?').get(pid);
       if (!p) throw notFound();
       // Atomic claim: only one caller can flip available -> sold.
       const claim = db.prepare("UPDATE paintings SET status='sold' WHERE id=? AND status='available'").run(pid);
       if (claim.changes === 0) throw conflict('Sorry, this painting was just sold');
-      const oid = Number(db.prepare('INSERT INTO orders (user_id, painting_id, price) VALUES (?,?,?)').run(req.user.id, pid, p.price).lastInsertRowid);
+      const oid = Number(db.prepare('INSERT INTO orders (user_id, painting_id, price, delivery_address, lat, lng) VALUES (?,?,?,?,?,?)')
+        .run(req.user.id, pid, p.price, address, lat, lng).lastInsertRowid);
       logEvent('orders', oid, 'placed', req.user.id);
       return oid;
     });
-    res.status(201).json(db.prepare(`${orderSelect} WHERE o.id = ?`).get(id));
+    res.status(201).json(getOrder(id));
   });
   app.get('/api/orders', requireAuth, (req, res) => {
     const [limit, offset] = paging(req);
     const [w, a] = req.user.role === 'admin' ? ['', []] : ['WHERE o.user_id = ?', [req.user.id]];
-    res.json(db.prepare(`${orderSelect} ${w} ORDER BY o.id DESC LIMIT ? OFFSET ?`).all(...a, limit, offset));
+    res.json(db.prepare(`${orderSelect} ${w} ORDER BY o.id DESC LIMIT ? OFFSET ?`).all(...a, limit, offset).map(shapeOrder));
   });
-  app.post('/api/orders/:id/cancel', customer, (req, res) => {
+  app.get('/api/orders/:id', requireAuth, (req, res) => res.json(ownerOrAdmin(req, getOrder(req.params.id))));
+  app.post('/api/orders/:id/cancel', customer, ah(async (req, res) => {
+    const id = Number(req.params.id);
     tx(() => {
-      const o = db.prepare('SELECT * FROM orders WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
+      const o = db.prepare('SELECT * FROM orders WHERE id = ? AND user_id = ?').get(id, req.user.id);
       if (!o) throw notFound();
       if (o.status !== 'placed') throw conflict('This order is already cancelled');
       db.prepare("UPDATE orders SET status='cancelled' WHERE id=?").run(o.id);
       db.prepare("UPDATE paintings SET status='available' WHERE id=?").run(o.painting_id);
+      payments.markRefundPending('orders', o.id);
       logEvent('orders', o.id, 'cancelled', req.user.id);
     });
-    res.json(db.prepare(`${orderSelect} WHERE o.id = ?`).get(req.params.id));
-  });
+    await payments.processRefund('orders', id); // no-op unless the order had been paid
+    res.json(getOrder(id));
+  }));
 
   // ---------- wall bookings ----------
-  const bookingSelect = `SELECT b.*, u.name AS customer_name, u.email AS customer_email
-    FROM bookings b JOIN users u ON u.id = b.user_id`;
+  const bookingSelect = `SELECT b.*, u.name AS customer_name, u.email AS customer_email, COALESCE(t.stage, 'scheduled') AS stage
+    FROM bookings b JOIN users u ON u.id = b.user_id
+    LEFT JOIN tracking t ON t.kind = 'bookings' AND t.record_id = b.id`;
   const withFlags = (b) => b && ({ ...b, can_cancel: ['requested', 'confirmed'].includes(b.status) && daysAway(b.booking_date) >= 3 });
   const getBooking = (id) => withFlags(db.prepare(`${bookingSelect} WHERE b.id = ?`).get(id));
 
@@ -268,10 +312,11 @@ export function createApp(db, { today = realToday } = {}) {
     if (d < 7 || d > 90) throw bad('Date must be between 7 and 90 days from today');
     const sqft = intIn(wallSqFt, 10, 500, 'Wall size (sq ft)');
     const addr = text(address, 'Address', { min: 5, max: 300 });
+    const [lat, lng] = coords(req.body?.lat, req.body?.lng);
     const id = tx(() => {
       try {
-        const bid = Number(db.prepare('INSERT INTO bookings (user_id, booking_date, wall_sqft, address, price) VALUES (?,?,?,?,?)')
-          .run(req.user.id, date, sqft, addr, sqft * seed.wallRatePerSqFt).lastInsertRowid);
+        const bid = Number(db.prepare('INSERT INTO bookings (user_id, booking_date, wall_sqft, address, price, lat, lng) VALUES (?,?,?,?,?,?,?)')
+          .run(req.user.id, date, sqft, addr, sqft * seed.wallRatePerSqFt, lat, lng).lastInsertRowid);
         logEvent('bookings', bid, 'requested', req.user.id);
         return bid;
       } catch (e) {
@@ -286,17 +331,21 @@ export function createApp(db, { today = realToday } = {}) {
     const [w, a] = req.user.role === 'admin' ? ['', []] : ['WHERE b.user_id = ?', [req.user.id]];
     res.json(db.prepare(`${bookingSelect} ${w} ORDER BY b.booking_date LIMIT ? OFFSET ?`).all(...a, limit, offset).map(withFlags));
   });
-  app.post('/api/bookings/:id/cancel', customer, (req, res) => {
+  app.get('/api/bookings/:id', requireAuth, (req, res) => res.json(ownerOrAdmin(req, getBooking(req.params.id))));
+  app.post('/api/bookings/:id/cancel', customer, ah(async (req, res) => {
+    const id = Number(req.params.id);
     tx(() => {
-      const b = db.prepare('SELECT * FROM bookings WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
+      const b = db.prepare('SELECT * FROM bookings WHERE id = ? AND user_id = ?').get(id, req.user.id);
       if (!b) throw notFound();
       if (!['requested', 'confirmed'].includes(b.status)) throw conflict(`This booking is already ${b.status}`);
       if (daysAway(b.booking_date) < 3) throw conflict('Bookings can only be cancelled until 3 days before the date');
       db.prepare("UPDATE bookings SET status='cancelled' WHERE id=?").run(b.id);
+      payments.markRefundPending('bookings', b.id);
       logEvent('bookings', b.id, 'cancelled', req.user.id);
     });
-    res.json(getBooking(req.params.id));
-  });
+    await payments.processRefund('bookings', id);
+    res.json(getBooking(id));
+  }));
 
   // Studio decision on a request: only from "requested", with an optional note for the customer.
   const decide = (table, kind, from, to, fetch) => (req, res) => {
@@ -343,6 +392,7 @@ export function createApp(db, { today = realToday } = {}) {
     const [w, a] = req.user.role === 'admin' ? ['', []] : ['WHERE p.user_id = ?', [req.user.id]];
     res.json(db.prepare(`${potterySelect} ${w} ORDER BY p.id DESC LIMIT ? OFFSET ?`).all(...a, limit, offset));
   });
+  app.get('/api/pottery/:id', requireAuth, (req, res) => res.json(ownerOrAdmin(req, getPottery(req.params.id))));
   app.put('/api/pottery/:id', customer, (req, res) => {
     const vals = potteryBody(req.body);
     tx(() => {
@@ -367,6 +417,24 @@ export function createApp(db, { today = realToday } = {}) {
   app.post('/api/pottery/:id/accept', admin, decide('pottery_requests', 'pottery', 'requested', 'accepted', getPottery));
   app.post('/api/pottery/:id/decline', admin, decide('pottery_requests', 'pottery', 'requested', 'declined', getPottery));
 
+  // ---------- payments and live tracking live in their own modules ----------
+  payments.register(app, { customer, admin, ah });
+  tracking.register(app, { requireAuth, admin });
+
+  // ---------- studio dashboard numbers ----------
+  app.get('/api/admin/summary', admin, (_req, res) => {
+    const n = (sql) => db.prepare(sql).get().n;
+    res.json({
+      paintingsAvailable: n("SELECT COUNT(*) n FROM paintings WHERE status='available'"),
+      paintingsSold: n("SELECT COUNT(*) n FROM paintings WHERE status='sold'"),
+      ordersPlaced: n("SELECT COUNT(*) n FROM orders WHERE status='placed'"),
+      bookingsPending: n("SELECT COUNT(*) n FROM bookings WHERE status='requested'"),
+      bookingsConfirmed: n("SELECT COUNT(*) n FROM bookings WHERE status='confirmed'"),
+      potteryPending: n("SELECT COUNT(*) n FROM pottery_requests WHERE status='requested'"),
+      revenue: n("SELECT COALESCE(SUM(amount),0) n FROM payments WHERE status='paid'"),
+    });
+  });
+
   // ---------- history: customers see only their own records (404 otherwise) ----------
   const historyOwner = {
     orders: 'SELECT user_id FROM orders WHERE id = ?',
@@ -376,8 +444,7 @@ export function createApp(db, { today = realToday } = {}) {
   app.get('/api/history/:kind/:id', requireAuth, (req, res) => {
     const sql = historyOwner[req.params.kind];
     if (!sql) throw notFound();
-    const rec = db.prepare(sql).get(req.params.id);
-    if (!rec || (req.user.role !== 'admin' && rec.user_id !== req.user.id)) throw notFound();
+    ownerOrAdmin(req, db.prepare(sql).get(req.params.id));
     res.json(db.prepare(`SELECT e.status, e.note, e.created_at, u.name AS actor FROM status_events e
       LEFT JOIN users u ON u.id = e.actor_id WHERE e.kind = ? AND e.record_id = ? ORDER BY e.id`).all(req.params.kind, req.params.id));
   });
