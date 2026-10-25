@@ -20,6 +20,7 @@
   .msg { padding: 8px 12px; border-radius: 4px; margin-bottom: 12px; }
   .msg.err { background: #fde8e8; color: #8a1c1c; } .msg.ok { background: #e6f4ea; color: #1d5c2e; }
   form.card { display: grid; gap: 8px; }
+  form.filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: end; }
   label { display: grid; gap: 3px; font-size: 14px; }
   input, select, textarea, button.act { font: inherit; padding: 6px 8px; }
   button.act { cursor: pointer; border: 1px solid #aaa; background: #fff; border-radius: 4px; margin-left: 6px; }
@@ -29,6 +30,7 @@
   .badge.available, .badge.confirmed, .badge.accepted, .badge.placed { background: #dff3e4; }
   .badge.sold, .badge.declined, .badge.cancelled { background: #f6dede; }
   .badge.requested { background: #fff3cd; }
+  .hist { font-size: 13px; color: #555; margin: 6px 0 0; padding-left: 18px; }
   h2 { margin-top: 0; }
 </style>
 </head>
@@ -38,41 +40,71 @@
   <nav id="nav"></nav>
   <div class="right" id="who"></div>
 </header>
-<main id="main"></main>
+<main>
+  <div id="flash"></div>
+  <div id="main"></div>
+</main>
 
 <script>
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const money = (n) => '₹' + Number(n).toLocaleString('en-IN');
-let me = null, config = null, tab = 'paintings', flash = null;
+const PAGE = 50;
+let me = null, config = null, tab = 'paintings', reload = () => {}, onRefusal = () => {};
 
 async function api(method, path, body) {
   const r = await fetch('/api' + path, { method, headers: { 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
   const data = await r.json().catch(() => ({}));
-  if (r.status === 401 && me) { me = null; render(); }
+  if (r.status === 401 && me && !path.startsWith('/auth/')) { me = null; render(); flash('err', 'Your session ended. Please log in again.'); }
   if (!r.ok) throw new Error(data.error || `Request failed (${r.status})`);
   return data;
 }
-function setFlash(type, text) { flash = { type, text }; }
-const flashHtml = () => { const f = flash; flash = null; return f ? `<div class="msg ${f.type}">${esc(f.text)}</div>` : ''; };
+// The banner lives outside the views, so a refusal never wipes what the user typed.
+function flash(type, text) { $('#flash').innerHTML = text ? `<div class="msg ${type}">${esc(text)}</div>` : ''; }
 
-// Every data screen goes through here: loading -> (error | empty | content).
-async function loadInto(el, fetcher, renderItem, emptyText) {
-  el.innerHTML = '<div class="state">Loading…</div>';
-  try {
-    const items = await fetcher();
-    el.innerHTML = items.length ? items.map(renderItem).join('') : `<div class="state">${esc(emptyText)}</div>`;
-  } catch (e) {
-    el.innerHTML = `<div class="state error">${esc(e.message)} <button class="act" data-retry>Retry</button></div>`;
-    el.querySelector('[data-retry]').onclick = () => loadInto(el, fetcher, renderItem, emptyText);
-  }
+// Every data screen goes through here: loading -> (error | empty | content), with "Load more" paging.
+async function loadInto(el, fetchPage, renderItem, emptyText, after = () => {}) {
+  let items = [];
+  const draw = (more) => {
+    el.innerHTML = (items.length ? items.map(renderItem).join('') : `<div class="state">${esc(emptyText)}</div>`)
+      + (more ? '<div class="state"><button class="act" data-more>Load more</button></div>' : '');
+    el.querySelector('[data-more]')?.addEventListener('click', () => step());
+    after(el, items);
+  };
+  const step = async () => {
+    try { const page = await fetchPage(items.length); items = items.concat(page); draw(page.length === PAGE); }
+    catch (e) {
+      el.insertAdjacentHTML('beforeend', `<div class="state error">${esc(e.message)} <button class="act" data-retry>Retry</button></div>`);
+      el.querySelector('[data-retry]').onclick = () => (items.length ? step() : start());
+    }
+  };
+  const start = () => { items = []; el.innerHTML = '<div class="state">Loading…</div>'; return step(); };
+  reload = start;
+  return start();
 }
-// Run an action, show its result/refusal in the banner, then refresh the tab.
+// Run an action. Success: confirm and redraw the view. Refusal: show it and refresh data only (forms keep their values).
 async function act(fn, okText) {
-  try { await fn(); setFlash('ok', okText); } catch (e) { setFlash('err', e.message); }
-  show();
+  try { await fn(); flash('ok', okText); show(); }
+  catch (e) { flash('err', e.message); reload(); onRefusal(); }
 }
-const bind = (root, sel, ev, fn) => root.querySelectorAll(sel).forEach((n) => n.addEventListener(ev, () => fn(n)));
+const bind = (root, sel, fn) => root.querySelectorAll(sel).forEach((n) => n.addEventListener('click', () => fn(n)));
+const askNote = (label) => { const n = prompt(`${label} (optional note for the customer)`, ''); return n === null ? null : n; };
+const noteHtml = (n) => (n ? `<div class="muted">Studio note: ${esc(n)}</div>` : '');
+
+// Inline status history for a record.
+function wireHistory(root, kind) {
+  bind(root, '[data-hist]', async (b) => {
+    const slot = root.querySelector(`[data-slot="${b.dataset.hist}"]`);
+    if (slot.innerHTML) { slot.innerHTML = ''; return; }
+    slot.innerHTML = '<div class="muted">Loading history…</div>';
+    try {
+      const h = await api('GET', `/history/${kind}/${b.dataset.hist}`);
+      slot.innerHTML = `<ul class="hist">${h.map((e) => `<li>${esc(e.status)} · ${esc(e.actor || '?')} · ${esc(e.created_at)}${e.note ? ' · ' + esc(e.note) : ''}</li>`).join('')}</ul>`;
+    } catch (e) { slot.innerHTML = `<div class="muted">${esc(e.message)}</div>`; }
+  });
+}
+const histBtn = (id) => `<button class="act" data-hist="${id}">History</button>`;
+const histSlot = (id) => `<div data-slot="${id}"></div>`;
 
 // ---------- shell ----------
 function render() {
@@ -80,29 +112,29 @@ function render() {
   if (!me) { nav.innerHTML = ''; who.innerHTML = ''; return authView(); }
   const tabs = [['paintings', 'Paintings'], ['orders', 'Orders'], ['bookings', 'Wall bookings'], ['pottery', 'Pottery']];
   nav.innerHTML = tabs.map(([k, l]) => `<button data-t="${k}" class="${k === tab ? 'active' : ''}">${l}</button>`).join('');
-  bind(nav, 'button', 'click', (b) => { tab = b.dataset.t; render(); });
+  bind(nav, 'button', (b) => { tab = b.dataset.t; flash(); render(); });
   who.innerHTML = `${esc(me.name)} (${me.role}) <button id="out">Log out</button>`;
-  $('#out').onclick = async () => { await api('POST', '/auth/logout').catch(() => {}); me = null; render(); };
+  $('#out').onclick = async () => { await api('POST', '/auth/logout').catch(() => {}); me = null; flash(); render(); };
   show();
 }
-function show() { ({ paintings: paintingsView, orders: ordersView, bookings: bookingsView, pottery: potteryView })[tab](); }
+function show() { onRefusal = () => {}; ({ paintings: paintingsView, orders: ordersView, bookings: bookingsView, pottery: potteryView })[tab](); }
 
 function authView() {
-  $('#main').innerHTML = `${flashHtml()}
+  $('#main').innerHTML = `
   <form class="card" id="login"><h2>Log in</h2>
     <label>Email<input name="email" type="email" required></label>
     <label>Password<input name="password" type="password" required></label>
     <button class="act primary">Log in</button></form>
   <form class="card" id="signup"><h2>New customer? Sign up</h2>
-    <label>Name<input name="name" required></label>
-    <label>Email<input name="email" type="email" required></label>
-    <label>Password (min 6)<input name="password" type="password" minlength="6" required></label>
+    <label>Name<input name="name" maxlength="80" required></label>
+    <label>Email<input name="email" type="email" maxlength="120" required></label>
+    <label>Password (min 6)<input name="password" type="password" minlength="6" maxlength="200" required></label>
     <button class="act primary">Create account</button></form>`;
   for (const [id, path] of [['login', '/auth/login'], ['signup', '/auth/signup']]) {
     $('#' + id).onsubmit = async (e) => {
       e.preventDefault();
-      try { me = await api('POST', path, Object.fromEntries(new FormData(e.target))); config = await api('GET', '/seed'); tab = 'paintings'; render(); }
-      catch (err) { setFlash('err', err.message); authView(); }
+      try { me = await api('POST', path, Object.fromEntries(new FormData(e.target))); config = await api('GET', '/seed'); tab = 'paintings'; flash(); render(); }
+      catch (err) { flash('err', err.message); }
     };
   }
 }
@@ -110,121 +142,147 @@ function authView() {
 // ---------- paintings ----------
 function paintingsView() {
   const isAdmin = me.role === 'admin';
-  $('#main').innerHTML = `${flashHtml()}<h2>Paintings</h2>
+  $('#main').innerHTML = `<h2>Paintings</h2>
     ${isAdmin ? `<form class="card" id="pform"><b id="ptitle">Add a painting</b>
-      <input type="hidden" name="id">
-      <label>Title<input name="title" required></label>
-      <label>Artist<input name="artist"></label>
-      <label>Description<input name="description"></label>
+      <input type="hidden" name="pid">
+      <label>Title<input name="title" maxlength="120" required></label>
+      <label>Artist<input name="artist" maxlength="80"></label>
+      <label>Description<input name="description" maxlength="500"></label>
       <label>Price (₹)<input name="price" type="number" min="1" step="1" required></label>
       <div><button class="act primary">Save</button><button type="button" class="act" id="pclear">Clear</button></div></form>` : ''}
+    <form class="card filters" id="filters">
+      <label>Search<input name="q" placeholder="title, artist…"></label>
+      <label>Status<select name="status"><option value="">All</option><option value="available">Available</option><option value="sold">Sold</option></select></label>
+      <label>Min ₹<input name="min" type="number" min="0" style="width:90px"></label>
+      <label>Max ₹<input name="max" type="number" min="0" style="width:90px"></label>
+      <button class="act primary">Filter</button></form>
     <div id="list"></div>`;
-  const list = $('#list'); let cache = [];
-  loadInto(list, async () => (cache = await api('GET', '/paintings')), (p) => `
+  const list = $('#list'), filters = $('#filters');
+  const query = (offset) => {
+    const p = new URLSearchParams({ limit: PAGE, offset });
+    for (const [k, v] of new FormData(filters)) if (v !== '') p.set(k, v);
+    return p.toString();
+  };
+  const draw = () => loadInto(list, (offset) => api('GET', '/paintings?' + query(offset)), (p) => `
     <div class="card row"><div><b>${esc(p.title)}</b> <span class="badge ${p.status}">${p.status}</span>
       <div class="muted">${esc(p.artist)} ${esc(p.description)}</div></div>
       <div>${money(p.price)}
       ${!isAdmin && p.status === 'available' ? `<button class="act primary" data-buy="${p.id}">Buy</button>` : ''}
-      ${isAdmin && p.status === 'available' ? `<button class="act" data-edit="${p.id}">Edit</button>` : ''}</div></div>`,
-    'No paintings yet.').then(() => {
-    bind(list, '[data-buy]', 'click', (b) => act(() => api('POST', '/orders', { paintingId: Number(b.dataset.buy) }), 'Order placed.'));
-    bind(list, '[data-edit]', 'click', (b) => {
-      const p = cache.find((x) => x.id == b.dataset.edit), f = $('#pform');
-      for (const k of ['id', 'title', 'artist', 'description', 'price']) f[k].value = p[k];
-      $('#ptitle').textContent = 'Edit painting #' + p.id; f.scrollIntoView();
+      ${isAdmin && p.status === 'available' ? `<button class="act" data-edit="${p.id}">Edit</button><button class="act danger" data-del="${p.id}">Delete</button>` : ''}</div></div>`,
+    'No paintings match.', (el, items) => {
+      bind(el, '[data-buy]', (b) => act(() => api('POST', '/orders', { paintingId: Number(b.dataset.buy) }), 'Order placed.'));
+      bind(el, '[data-del]', (b) => confirm('Delete this painting?') && act(() => api('DELETE', '/paintings/' + b.dataset.del), 'Painting deleted.'));
+      bind(el, '[data-edit]', (b) => {
+        const p = items.find((x) => x.id == b.dataset.edit), f = $('#pform');
+        const el = f.elements;
+        el.pid.value = p.id; el.title.value = p.title; el.artist.value = p.artist; el.description.value = p.description; el.price.value = p.price;
+        $('#ptitle').textContent = 'Edit painting #' + p.id; f.scrollIntoView();
+      });
     });
-  });
+  filters.onsubmit = (e) => { e.preventDefault(); draw(); };
   if (isAdmin) {
-    $('#pclear').onclick = () => { $('#pform').reset(); $('#pform').id.value = ''; $('#ptitle').textContent = 'Add a painting'; };
+    $('#pclear').onclick = () => { $('#pform').reset(); $('#pform').pid.value = ''; $('#ptitle').textContent = 'Add a painting'; };
     $('#pform').onsubmit = (e) => {
       e.preventDefault();
-      const d = Object.fromEntries(new FormData(e.target)), id = d.id; delete d.id;
+      const d = Object.fromEntries(new FormData(e.target)), id = d.pid; delete d.pid;
       act(() => (id ? api('PUT', '/paintings/' + id, d) : api('POST', '/paintings', d)), id ? 'Painting updated.' : 'Painting added.');
     };
   }
+  draw();
 }
 
 // ---------- orders ----------
 function ordersView() {
   const isAdmin = me.role === 'admin';
-  $('#main').innerHTML = `${flashHtml()}<h2>${isAdmin ? 'All orders' : 'My orders'}</h2><div id="list"></div>`;
-  loadInto($('#list'), () => api('GET', '/orders'), (o) => `
-    <div class="card row"><div><b>${esc(o.painting_title)}</b> <span class="badge ${o.status}">${o.status}</span>
+  $('#main').innerHTML = `<h2>${isAdmin ? 'All orders' : 'My orders'}</h2><div id="list"></div>`;
+  loadInto($('#list'), (offset) => api('GET', `/orders?limit=${PAGE}&offset=${offset}`), (o) => `
+    <div class="card"><div class="row"><div><b>${esc(o.painting_title)}</b> <span class="badge ${o.status}">${o.status}</span>
       <div class="muted">${isAdmin ? esc(o.customer_name) + ' · ' + esc(o.customer_email) + ' · ' : ''}${money(o.price)} · ${esc(o.created_at)}</div></div>
-      <div>${!isAdmin && o.status === 'placed' ? `<button class="act danger" data-cancel="${o.id}">Cancel order</button>` : ''}</div></div>`,
-    'No orders yet.').then(() =>
-    bind($('#list'), '[data-cancel]', 'click', (b) => act(() => api('POST', `/orders/${b.dataset.cancel}/cancel`), 'Order cancelled.')));
+      <div>${histBtn(o.id)}${!isAdmin && o.status === 'placed' ? `<button class="act danger" data-cancel="${o.id}">Cancel order</button>` : ''}</div></div>${histSlot(o.id)}</div>`,
+    'No orders yet.', (el) => {
+      bind(el, '[data-cancel]', (b) => act(() => api('POST', `/orders/${b.dataset.cancel}/cancel`), 'Order cancelled.'));
+      wireHistory(el, 'orders');
+    });
 }
 
 // ---------- wall bookings ----------
-const isoPlus = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+const addDays = (iso, n) => { const [y, m, d] = iso.split('-').map(Number); return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10); };
 function bookingsView() {
   const isAdmin = me.role === 'admin';
-  $('#main').innerHTML = `${flashHtml()}<h2>Wall painting bookings</h2>
+  const min = addDays(config.today, 7), max = addDays(config.today, 90);
+  $('#main').innerHTML = `<h2>Wall painting bookings</h2>
     ${isAdmin ? '' : `<form class="card" id="bform"><b>Book a date (7–90 days away, ₹${config.wallRatePerSqFt}/sq ft)</b>
-      <label>Date<input name="date" type="date" min="${isoPlus(7)}" max="${isoPlus(90)}" required></label>
+      <label>Date<input name="date" type="date" min="${min}" max="${max}" required></label>
       <label>Wall size (10–500 sq ft)<input name="wallSqFt" type="number" min="10" max="500" step="1" required></label>
-      <label>Address<textarea name="address" required minlength="5"></textarea></label>
+      <label>Address<textarea name="address" required minlength="5" maxlength="300"></textarea></label>
       <div class="muted" id="quote"></div>
       <div><button class="act primary">Request booking</button></div>
       <div class="muted" id="taken"></div></form>`}
     <div id="list"></div>`;
   if (!isAdmin) {
     const f = $('#bform');
+    let taken = [];
+    const check = () => f.date.setCustomValidity(taken.includes(f.date.value) ? 'That date is already taken' : '');
+    const loadTaken = () => api('GET', '/bookings/taken-dates').then((d) => {
+      taken = d; check();
+      $('#taken').textContent = d.length ? 'Already taken (pick another): ' + d.join(', ') : 'No dates taken yet.';
+    }).catch(() => { $('#taken').textContent = 'Could not load taken dates (the server will still check).'; });
+    f.date.oninput = check;
     f.wallSqFt.oninput = () => { $('#quote').textContent = f.wallSqFt.value ? 'Price: ' + money(f.wallSqFt.value * config.wallRatePerSqFt) : ''; };
-    api('GET', '/bookings/taken-dates').then((d) => { $('#taken').textContent = d.length ? 'Already taken: ' + d.join(', ') : 'No dates taken yet.'; })
-      .catch(() => { $('#taken').textContent = 'Could not load taken dates (the server will still check).'; });
     f.onsubmit = (e) => { e.preventDefault(); const d = Object.fromEntries(new FormData(f)); act(() => api('POST', '/bookings', d), 'Booking requested.'); };
+    loadTaken();
+    onRefusal = loadTaken; // a refusal may mean a date was just taken, so refresh that list too
   }
-  loadInto($('#list'), () => api('GET', '/bookings'), (b) => `
-    <div class="card row"><div><b>${esc(b.booking_date)}</b> <span class="badge ${b.status}">${b.status}</span>
-      <div class="muted">${isAdmin ? esc(b.customer_name) + ' · ' : ''}${b.wall_sqft} sq ft · ${money(b.price)} · ${esc(b.address)}</div></div>
-      <div>${isAdmin && b.status === 'requested' ? `<button class="act primary" data-ok="${b.id}">Confirm</button><button class="act danger" data-no="${b.id}">Decline</button>` : ''}
-      ${!isAdmin && ['requested', 'confirmed'].includes(b.status) ? `<button class="act danger" data-cancel="${b.id}">Cancel</button>` : ''}</div></div>`,
-    'No bookings yet.').then(() => {
-    const L = $('#list');
-    bind(L, '[data-ok]', 'click', (b) => act(() => api('POST', `/bookings/${b.dataset.ok}/confirm`), 'Booking confirmed.'));
-    bind(L, '[data-no]', 'click', (b) => act(() => api('POST', `/bookings/${b.dataset.no}/decline`), 'Booking declined.'));
-    bind(L, '[data-cancel]', 'click', (b) => act(() => api('POST', `/bookings/${b.dataset.cancel}/cancel`), 'Booking cancelled.'));
-  });
+  loadInto($('#list'), (offset) => api('GET', `/bookings?limit=${PAGE}&offset=${offset}`), (b) => `
+    <div class="card"><div class="row"><div><b>${esc(b.booking_date)}</b> <span class="badge ${b.status}">${b.status}</span>
+      <div class="muted">${isAdmin ? esc(b.customer_name) + ' · ' : ''}${b.wall_sqft} sq ft · ${money(b.price)} · ${esc(b.address)}</div>${noteHtml(b.note)}</div>
+      <div>${histBtn(b.id)}${isAdmin && b.status === 'requested' ? `<button class="act primary" data-ok="${b.id}">Confirm</button><button class="act danger" data-no="${b.id}">Decline</button>` : ''}
+      ${!isAdmin && b.can_cancel ? `<button class="act danger" data-cancel="${b.id}">Cancel</button>` : ''}
+      ${!isAdmin && !b.can_cancel && ['requested', 'confirmed'].includes(b.status) ? '<span class="muted">Too late to cancel (under 3 days)</span>' : ''}</div></div>${histSlot(b.id)}</div>`,
+    'No bookings yet.', (el) => {
+      bind(el, '[data-ok]', (b) => { const n = askNote('Confirm booking'); if (n !== null) act(() => api('POST', `/bookings/${b.dataset.ok}/confirm`, { note: n }), 'Booking confirmed.'); });
+      bind(el, '[data-no]', (b) => { const n = askNote('Decline booking'); if (n !== null) act(() => api('POST', `/bookings/${b.dataset.no}/decline`, { note: n }), 'Booking declined.'); });
+      bind(el, '[data-cancel]', (b) => act(() => api('POST', `/bookings/${b.dataset.cancel}/cancel`), 'Booking cancelled.'));
+      wireHistory(el, 'bookings');
+    });
 }
 
 // ---------- pottery ----------
 function potteryView() {
-  const isAdmin = me.role === 'admin'; let cache = [];
-  const opts = (arr, sel) => arr.map((v) => `<option ${v === sel ? 'selected' : ''}>${esc(v)}</option>`).join('');
-  $('#main').innerHTML = `${flashHtml()}<h2>Custom pottery</h2>
-    ${isAdmin ? '' : `<form class="card" id="pform"><b id="ptitle">Request pottery</b><input type="hidden" name="id">
+  const isAdmin = me.role === 'admin';
+  const opts = (arr) => arr.map((v) => `<option>${esc(v)}</option>`).join('');
+  $('#main').innerHTML = `<h2>Custom pottery</h2>
+    ${isAdmin ? '' : `<form class="card" id="pform"><b id="ptitle">Request pottery</b><input type="hidden" name="rid">
       <label>Item<select name="item">${config.potteryItems.map((i) => `<option value="${esc(i.name)}">${esc(i.name)} (${money(i.price)} each)</option>`).join('')}</select></label>
       <label>Glaze<select name="glaze">${opts(config.glazes)}</select></label>
       <label>Quantity (1–12)<input name="quantity" type="number" min="1" max="12" step="1" value="1" required></label>
-      <label>Needed by (at least 14 days away)<input name="neededBy" type="date" min="${isoPlus(14)}" required></label>
+      <label>Needed by (at least 14 days away)<input name="neededBy" type="date" min="${addDays(config.today, 14)}" required></label>
       <div><button class="act primary">Save request</button><button type="button" class="act" id="pclear">Clear</button></div></form>`}
     <div id="list"></div>`;
   if (!isAdmin) {
     const f = $('#pform');
-    $('#pclear').onclick = () => { f.reset(); f.id.value = ''; $('#ptitle').textContent = 'Request pottery'; };
+    $('#pclear').onclick = () => { f.reset(); f.rid.value = ''; $('#ptitle').textContent = 'Request pottery'; };
     f.onsubmit = (e) => {
-      e.preventDefault(); const d = Object.fromEntries(new FormData(f)), id = d.id; delete d.id;
+      e.preventDefault(); const d = Object.fromEntries(new FormData(f)), id = d.rid; delete d.rid;
       act(() => (id ? api('PUT', '/pottery/' + id, d) : api('POST', '/pottery', d)), id ? 'Request updated.' : 'Request sent.');
     };
   }
-  loadInto($('#list'), async () => (cache = await api('GET', '/pottery')), (r) => `
-    <div class="card row"><div><b>${r.quantity} × ${esc(r.item)}</b>, ${esc(r.glaze)} <span class="badge ${r.status}">${r.status}</span>
-      <div class="muted">${isAdmin ? esc(r.customer_name) + ' · ' : ''}needed by ${esc(r.needed_by)} · ${money(r.price)}</div></div>
-      <div>${isAdmin && r.status === 'requested' ? `<button class="act primary" data-ok="${r.id}">Accept</button><button class="act danger" data-no="${r.id}">Decline</button>` : ''}
-      ${!isAdmin && r.status === 'requested' ? `<button class="act" data-edit="${r.id}">Edit</button><button class="act danger" data-cancel="${r.id}">Cancel</button>` : ''}</div></div>`,
-    'No pottery requests yet.').then(() => {
-    const L = $('#list');
-    bind(L, '[data-ok]', 'click', (b) => act(() => api('POST', `/pottery/${b.dataset.ok}/accept`), 'Request accepted.'));
-    bind(L, '[data-no]', 'click', (b) => act(() => api('POST', `/pottery/${b.dataset.no}/decline`), 'Request declined.'));
-    bind(L, '[data-cancel]', 'click', (b) => act(() => api('POST', `/pottery/${b.dataset.cancel}/cancel`), 'Request cancelled.'));
-    bind(L, '[data-edit]', 'click', (b) => {
-      const r = cache.find((x) => x.id == b.dataset.edit), f = $('#pform');
-      f.id.value = r.id; f.item.value = r.item; f.glaze.value = r.glaze; f.quantity.value = r.quantity; f.neededBy.value = r.needed_by;
-      $('#ptitle').textContent = 'Edit request #' + r.id; f.scrollIntoView();
+  loadInto($('#list'), (offset) => api('GET', `/pottery?limit=${PAGE}&offset=${offset}`), (r) => `
+    <div class="card"><div class="row"><div><b>${r.quantity} × ${esc(r.item)}</b>, ${esc(r.glaze)} <span class="badge ${r.status}">${r.status}</span>
+      <div class="muted">${isAdmin ? esc(r.customer_name) + ' · ' : ''}needed by ${esc(r.needed_by)} · ${money(r.price)}</div>${noteHtml(r.note)}</div>
+      <div>${histBtn(r.id)}${isAdmin && r.status === 'requested' ? `<button class="act primary" data-ok="${r.id}">Accept</button><button class="act danger" data-no="${r.id}">Decline</button>` : ''}
+      ${!isAdmin && r.status === 'requested' ? `<button class="act" data-edit="${r.id}">Edit</button><button class="act danger" data-cancel="${r.id}">Cancel</button>` : ''}</div></div>${histSlot(r.id)}</div>`,
+    'No pottery requests yet.', (el, items) => {
+      bind(el, '[data-ok]', (b) => { const n = askNote('Accept request'); if (n !== null) act(() => api('POST', `/pottery/${b.dataset.ok}/accept`, { note: n }), 'Request accepted.'); });
+      bind(el, '[data-no]', (b) => { const n = askNote('Decline request'); if (n !== null) act(() => api('POST', `/pottery/${b.dataset.no}/decline`, { note: n }), 'Request declined.'); });
+      bind(el, '[data-cancel]', (b) => act(() => api('POST', `/pottery/${b.dataset.cancel}/cancel`), 'Request cancelled.'));
+      bind(el, '[data-edit]', (b) => {
+        const r = items.find((x) => x.id == b.dataset.edit), f = $('#pform');
+        f.rid.value = r.id; f.item.value = r.item; f.glaze.value = r.glaze; f.quantity.value = r.quantity; f.neededBy.value = r.needed_by;
+        $('#ptitle').textContent = 'Edit request #' + r.id; f.scrollIntoView();
+      });
+      wireHistory(el, 'pottery');
     });
-  });
 }
 
 // ---------- boot ----------

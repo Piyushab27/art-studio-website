@@ -19,8 +19,10 @@ The first start creates `studio.db`, a studio account and a few sample paintings
 
 | Role | Login |
 |------|-------|
-| Studio (admin) | `studio@example.com` / `studio123` (override with `ADMIN_EMAIL` / `ADMIN_PASSWORD`) |
+| Studio (admin) | `ADMIN_EMAIL` (default `studio@example.com`) with `ADMIN_PASSWORD`. If you do not set a password, a random one is printed in the console on first start, once. |
 | Customer | Sign up on the home page |
+
+The app checks the Node version on start and tells you if it is older than 22.5.
 
 ## Tests
 
@@ -28,7 +30,7 @@ The first start creates `studio.db`, a studio account and a few sample paintings
 npm test
 ```
 
-Starts the app on a temporary database and checks 401/403/404 rules, one-buyer-per-painting and one-booking-per-date (with concurrent requests), the date and quantity limits, and the cancel and edit rules.
+Starts the app on a temporary database with a frozen clock and checks 401/403/404 rules, one-buyer-per-painting and one-booking-per-date (with concurrent requests), the exact date boundaries (7, 90, 14 and the 3-day cancel cutoff), session expiry, login rate limiting, cross-site refusal, input limits, history and paging.
 
 ## Seed data
 
@@ -40,3 +42,11 @@ Starts the app on a temporary database and checks 401/403/404 rules, one-buyer-p
 - `app.js`: API routes, auth and role checks, business rules
 - `public/index.html`: the whole UI
 - `test/smoke.js`: end-to-end checks
+
+## Extras beyond the brief
+
+- Status history for orders, bookings and pottery requests, plus an optional studio note when confirming, accepting or declining
+- Delete a painting (only while available and with no order history)
+- Painting search and filters; paging on every list
+- Sessions expire after 7 days on the server; login is rate limited; cross-site writes are refused
+- Dates use the studio time zone (`APP_TIMEZONE`, default `Asia/Kolkata`)

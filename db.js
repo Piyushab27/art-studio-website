@@ -2,6 +2,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { randomBytes, scryptSync } from 'node:crypto';
 
+export const SESSION_DAYS = 7;
+
 export const seed = JSON.parse(readFileSync(new URL('./data/seed.json', import.meta.url), 'utf8'));
 
 export function hashPassword(password) {
@@ -38,6 +40,7 @@ export function openDb(file = process.env.DB_FILE || 'studio.db') {
       booking_date TEXT NOT NULL, wall_sqft INTEGER NOT NULL, address TEXT NOT NULL,
       price INTEGER NOT NULL,
       status TEXT NOT NULL DEFAULT 'requested' CHECK (status IN ('requested','confirmed','declined','cancelled')),
+      note TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
     -- Backstop: a date can be held by only one requested/confirmed booking.
     CREATE UNIQUE INDEX IF NOT EXISTS one_live_booking_per_date
@@ -47,13 +50,31 @@ export function openDb(file = process.env.DB_FILE || 'studio.db') {
       item TEXT NOT NULL, glaze TEXT NOT NULL, quantity INTEGER NOT NULL,
       needed_by TEXT NOT NULL, price INTEGER NOT NULL,
       status TEXT NOT NULL DEFAULT 'requested' CHECK (status IN ('requested','accepted','declined','cancelled')),
+      note TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+    -- Audit trail: every status change, who made it, and any note.
+    CREATE TABLE IF NOT EXISTS status_events (
+      id INTEGER PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('orders','bookings','pottery')),
+      record_id INTEGER NOT NULL, status TEXT NOT NULL, actor_id INTEGER REFERENCES users(id),
+      note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+    CREATE INDEX IF NOT EXISTS events_by_record ON status_events(kind, record_id);
   `);
+  // Databases created by an earlier version lack the note column.
+  for (const t of ['bookings', 'pottery_requests']) {
+    if (!db.prepare(`PRAGMA table_info(${t})`).all().some((c) => c.name === 'note'))
+      db.exec(`ALTER TABLE ${t} ADD COLUMN note TEXT NOT NULL DEFAULT ''`);
+  }
+  db.exec(`DELETE FROM sessions WHERE created_at <= datetime('now', '-${SESSION_DAYS} days')`);
 
   // Studio account is seeded (studio sign-up is out of scope).
   const adminEmail = (process.env.ADMIN_EMAIL || 'studio@example.com').toLowerCase();
-  const adminPassword = process.env.ADMIN_PASSWORD || 'studio123';
   if (!db.prepare('SELECT 1 FROM users WHERE email = ?').get(adminEmail)) {
+    // No default password: use ADMIN_PASSWORD, or generate one and show it once.
+    let adminPassword = process.env.ADMIN_PASSWORD;
+    if (!adminPassword) {
+      adminPassword = randomBytes(6).toString('hex');
+      console.log(`Studio account created. Log in with ${adminEmail} / ${adminPassword} (shown once; set ADMIN_PASSWORD to choose your own).`);
+    }
     db.prepare('INSERT INTO users (name, email, password_hash, role) VALUES (?,?,?,?)')
       .run('Studio', adminEmail, hashPassword(adminPassword), 'admin');
   }
