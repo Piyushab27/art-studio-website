@@ -1,0 +1,18 @@
+{
+  "_note": "Placeholder in the shape the brief describes. Replace with the official seedData contents (wall rate, pottery items, glazes, paintings) if they differ.",
+  "wallRatePerSqFt": 45,
+  "potteryItems": [
+    { "name": "Mug", "price": 350 },
+    { "name": "Bowl", "price": 450 },
+    { "name": "Vase", "price": 900 },
+    { "name": "Plate", "price": 500 },
+    { "name": "Planter", "price": 700 }
+  ],
+  "glazes": ["Celadon", "Matte White", "Ocean Blue", "Terracotta", "Ash Grey"],
+  "paintings": [
+    { "title": "Monsoon Street", "artist": "Studio", "description": "Oil on canvas, 24x30 in", "price": 12000 },
+    { "title": "Quiet Harbour", "artist": "Studio", "description": "Acrylic on canvas, 18x24 in", "price": 8500 },
+    { "title": "Marigold Morning", "artist": "Studio", "description": "Watercolour, 12x16 in", "price": 4200 },
+    { "title": "Temple at Dusk", "artist": "Studio", "description": "Oil on canvas, 30x40 in", "price": 18000 }
+  ]
+}

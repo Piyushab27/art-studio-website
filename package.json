@@ -1,0 +1,12 @@
+{
+  "name": "art-studio",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server.js",
+    "test": "node --disable-warning=ExperimentalWarning test/smoke.js"
+  },
+  "engines": { "node": ">=22.5" },
+  "dependencies": { "express": "^4.21.2" }
+}
